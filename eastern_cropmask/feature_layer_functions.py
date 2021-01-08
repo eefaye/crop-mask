@@ -27,6 +27,8 @@ from deafrica_datahandling import load_ard
 warnings.filterwarnings("ignore")
 
 def gm_mads_two_seasons_predict(ds):
+    # edited 7 Jan for rainfall variants with dask
+    
     dc = datacube.Datacube(app='training')
     ds = ds / 10000
     ds1 = ds.sel(time=slice('2019-01', '2019-06'))
@@ -49,13 +51,25 @@ def gm_mads_two_seasons_predict(ds):
         
         #rainfall climatology
         if era == '_S1':
-            chirps = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chpclim = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2018 = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/chirps2018_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2019 = assign_crs(xr.open_rasterio('/g/data/CHIRPS/cumulative_2019/chirps2019_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
         if era == '_S2':
-            chirps = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chpclim = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2018 = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/chirps2018_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2019 = assign_crs(xr.open_rasterio('/g/data/CHIRPS/cumulative_2019/chirps2019_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
         
-        chirps = xr_reproject(chirps,ds.geobox,"bilinear")
-        chirps = chirps.chunk({'x':2000,'y':2000})
-        gm_mads['rain'] = chirps
+        chpclim = xr_reproject(chpclim,ds.geobox,"bilinear")
+        chirps2018 = xr_reproject(chirps2018,ds.geobox,"bilinear")
+        chirps2019 = xr_reproject(chirps2019,ds.geobox,"bilinear")
+        
+        chpclim = chpclim.chunk({'x':2000,'y':2000})
+        chirps2018 = chirps2018.chunk({'x':2000,'y':2000})
+        chirps2019 = chirps2019.chunk({'x':2000,'y':2000})
+        
+        gm_mads['chpclim'] = chpclim
+        gm_mads['chirps2018'] = chirps2018
+        gm_mads['chirps2019'] = chirps2019
         
         for band in gm_mads.data_vars:
             gm_mads = gm_mads.rename({band:band+era})
@@ -77,6 +91,8 @@ def gm_mads_two_seasons_predict(ds):
     return result.squeeze()
 
 def gm_mads_two_seasons_training(ds):
+    # Edtied 6 Jan to include rainfall variants
+    
     dc = datacube.Datacube(app='training')
     ds = ds / 10000
     ds1 = ds.sel(time=slice('2019-01', '2019-06'))
@@ -97,12 +113,21 @@ def gm_mads_two_seasons_training(ds):
         
         #rainfall climatology
         if era == '_S1':
-            chirps = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chpclim = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2018 = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/chirps2018_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2019 = assign_crs(xr.open_rasterio('/g/data/CHIRPS/cumulative_2019/chirps2019_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
         if era == '_S2':
-            chirps = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chpclim = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/CHPclim_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2018 = assign_crs(xr.open_rasterio('../pre-post_processing/data/CHIRPS/chirps2018_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
+            chirps2019 = assign_crs(xr.open_rasterio('/g/data/CHIRPS/cumulative_2019/chirps2019_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
         
-        chirps = xr_reproject(chirps,ds.geobox,"bilinear")
-        gm_mads['rain'] = chirps
+        chpclim = xr_reproject(chpclim,ds.geobox,"bilinear")
+        chirps2018 = xr_reproject(chirps2018,ds.geobox,"bilinear")
+        chirps2019 = xr_reproject(chirps2019,ds.geobox,"bilinear")
+        
+        gm_mads['chpclim'] = chpclim
+        gm_mads['chirps2018'] = chirps2018
+        gm_mads['chirps2019'] = chirps2019
         
         for band in gm_mads.data_vars:
             gm_mads = gm_mads.rename({band:band+era})
