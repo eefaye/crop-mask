@@ -76,6 +76,69 @@ def gm_mads_two_seasons_predict(ds):
 
     return result.squeeze()
 
+def gm_mads_annual_predict(ds):
+    # modified by eefaye 15 Jan 2021
+    
+    dc = datacube.Datacube(app='training')
+    ds = ds / 10000
+    
+    # test with and without narrow NIR
+#    ds = ds.rename({'nir_1':'nir_wide', 'nir_2':'nir'})
+
+#     ds1 = ds.sel(time=slice('2019-01', '2019-06'))
+#     ds2 = ds.sel(time=slice('2019-07', '2019-12'))
+
+    chpclim = []
+    for m in range(1,13):
+        chpclim.append(rio_slurp_xarray(f'https://deafrica-data-dev.s3.amazonaws.com/product-dev/deafrica_chpclim_50n_50s_{m:02d}.tif', 
+                                        gbox=ds.geobox, 
+                                        resapling='bilinear').expand_dims({'time':[m]})) 
+    chpclim = xr.concat(chpclim, dim='time')
+
+    def fun(ds, chirps, era):
+        #geomedian and tmads
+        #gm_mads = xr_geomedian_tmad(ds)
+        gm_mads = xr_geomedian_tmad_new(ds).compute()
+        gm_mads = calculate_indices(gm_mads,
+                               index=['NDVI','LAI','MNDWI'],
+                               drop=False,
+                               normalise=False,
+                               collection='s2')
+        
+        gm_mads['sdev'] = -np.log(gm_mads['sdev'])
+        gm_mads['bcdev'] = -np.log(gm_mads['bcdev'])
+        gm_mads['edev'] = -np.log(gm_mads['edev'])
+        gm_mads = gm_mads.chunk({'x':2000,'y':2000})
+        
+        #rainfall climatology
+        if era == '_S1':
+            chpclim = assign_crs(xr.open_rasterio('/g/data/CHIRPS/cumulative_alltime/CHPclim_jan_jun_cumulative_rainfall.nc'),  crs='epsg:4326')
+        if era == '_S2':
+            chpclim = assign_crs(xr.open_rasterio('/g/data/CHIRPS/cumulative_alltime/CHPclim_jul_dec_cumulative_rainfall.nc'),  crs='epsg:4326')
+        
+        chpclim = xr_reproject(chpclim,ds.geobox,"bilinear")
+        chpclim = chpclim.chunk({'x':2000,'y':2000})
+        gm_mads['chpclim'] = chpclim
+        
+        for band in gm_mads.data_vars:
+            gm_mads = gm_mads.rename({band:band+era})
+        
+        return gm_mads
+    
+    epoch0 = fun(ds, chirps, chpclim, era='_S0')
+#     epoch1 = fun(ds1, era='_S1')
+#     epoch2 = fun(ds2, era='_S2')
+    
+    #slope
+    url_slope = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_slope_africa.tif"
+    slope = rio_slurp_xarray(url_slope, gbox=ds.geobox)
+    slope = slope.to_dataset(name='slope').chunk({'x':2000,'y':2000})
+    
+    result = xr.merge([epoch0,
+                       slope],compat='override')
+
+    return result.squeeze()
+
 def gm_mads_two_seasons_training(ds):
     dc = datacube.Datacube(app='training')
     ds = ds / 10000
@@ -211,7 +274,315 @@ def gm_mads_evi_rainfall(ds):
     
     return result.squeeze()
 
+def gm_mads_evi_rainfall_hdstats_annual(ds):
+    """
+    Annual 
+    gm + mads
+    evi stats (10, 50, 90 percentile, range, std)
+    rainfall actual stats (min, mean, max, range, std) from monthly data
+    rainfall clim stats (min, mean, max, range, std) from monthly data
+    hdstats
+    """
+    dc = datacube.Datacube(app='training')
+    ds = ds / 10000
+    ds = ds.rename({'nir_1':'nir_wide', 'nir_2':'nir'})
+#     ds1 = ds.sel(time=slice('2019-01', '2019-06'))
+#     ds2 = ds.sel(time=slice('2019-07', '2019-12')) 
+    
+    chirps = []
+    chpclim = []
+    for m in range(1,13):
+        chirps.append(xr_reproject(assign_crs(xr.open_rasterio(f'/g/data/CHIRPS/monthly_2019/chirps-v2.0.2019.{m:02d}.tif').squeeze().expand_dims({'time':[m]}), crs='epsg:4326'), 
+                                   ds.geobox, "bilinear"))
+        chpclim.append(rio_slurp_xarray(f'https://deafrica-data-dev.s3.amazonaws.com/product-dev/deafrica_chpclim_50n_50s_{m:02d}.tif', gbox=ds.geobox, 
+                                        resapling='bilinear').expand_dims({'time':[m]}))
+    
+    chirps = xr.concat(chirps, dim='time')
+    chpclim = xr.concat(chpclim, dim='time')
+   
+    def fun(ds, chirps, chpclim, era):
+        
+        ds = calculate_indices(ds,
+                               index=['EVI'],
+                               drop=False,
+                               normalise=False,
+                               collection='s2')
+        
+        # temporal statistics
+        ts = temporal_statistics(ds.EVI,
+                                stats=['f_mean',
+                                       'f_std',
+                                       'f_median',
+                                      'abs_change',
+                                       'mean_change',
+                                       'median_change',
+                                      'discordance',
+                                      'complexity',
+                                      'central_diff'])
+        
+        # geomedian and tmads
+        gm_mads = xr_geomedian_tmad(ds)
+        gm_mads = calculate_indices(gm_mads,
+                               index=['EVI','NDVI','LAI','MNDWI'],
+                               drop=False,
+                               normalise=False,
+                               collection='s2')
+        
+        gm_mads['sdev'] = -np.log(gm_mads['sdev'])
+        gm_mads['bcdev'] = -np.log(gm_mads['bcdev'])
+        gm_mads['edev'] = -np.log(gm_mads['edev'])
+        
+        # EVI stats 
+        gm_mads['evi_10'] = ds.EVI.quantile(0.1, dim='time')
+        gm_mads['evi_50'] = ds.EVI.quantile(0.5, dim='time')
+        gm_mads['evi_90'] = ds.EVI.quantile(0.9, dim='time')
+        gm_mads['evi_range'] = gm_mads['evi_90'] - gm_mads['evi_10']
+        gm_mads['evi_std'] = ds.EVI.std(dim='time')
 
+        # rainfall actual
+        gm_mads['rain_min'] = chirps.min(dim='time')
+        gm_mads['rain_mean'] = chirps.mean(dim='time')
+        gm_mads['rain_max'] = chirps.max(dim='time')
+        gm_mads['rain_range'] = gm_mads['rain_max'] - gm_mads['rain_min']
+        gm_mads['rain_std'] = chirps.std(dim='time')
+         
+        # rainfall climatology
+        gm_mads['rainclim_min'] = chpclim.min(dim='time')
+        gm_mads['rainclim_mean'] = chpclim.mean(dim='time')
+        gm_mads['rainclim_max'] = chpclim.max(dim='time')
+        gm_mads['rainclim_range'] = gm_mads['rainclim_max'] - gm_mads['rainclim_min']
+        gm_mads['rainclim_std'] = chpclim.std(dim='time')
+        
+        # merge
+        res = xr.merge([gm_mads, ts], compat='override')
+        
+        for band in res.data_vars:
+            res = res.rename({band:band+era})
+                
+#         for band in gm_mads.data_vars:
+#             gm_mads = gm_mads.rename({band:band+era})
+        
+        return res
+    
+    epoch0 = fun(ds, chirps, chpclim, era='_S0')
+#     time, month = slice('2019-01', '2019-06'), slice(1, 6)
+#     epoch1 = fun(ds.sel(time=time), chirps.sel(time=month), chpclim.sel(time=month), era='_S1')
+#     time, month = slice('2019-07', '2019-12'), slice(7, 12)
+#     epoch2 = fun(ds.sel(time=time), chirps.sel(time=month), chpclim.sel(time=month), era='_S2')
+    
+    #slope
+    url_slope = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_slope_africa.tif"
+    slope = rio_slurp_xarray(url_slope, gbox=ds.geobox)
+    slope = slope.to_dataset(name='slope')
+    
+    result = xr.merge([epoch0,
+#                        epoch1,
+#                        epoch2,
+                       slope],compat='override')
+    
+    return result.squeeze()
+
+def flatness_gm_mads_evi_rainfall_hdstats_annual(ds):
+    """
+    Annual 
+    gm + mads
+    evi stats (10, 50, 90 percentile, range, std)
+    rainfall clim stats (min, mean, max, range, std) from monthly data (yearly stats removed)
+    MrVBF (valley bottom flatness) & MrRTF (ridge top flatness): give an indication of slope gradient over scale
+    hdstats
+    """
+    dc = datacube.Datacube(app='training')
+    ds = ds / 10000
+    ds = ds.rename({'nir_1':'nir_wide', 'nir_2':'nir'})
+
+    chpclim = []
+    for m in range(1,13):
+        chpclim.append(rio_slurp_xarray(f'https://deafrica-data-dev.s3.amazonaws.com/product-dev/deafrica_chpclim_50n_50s_{m:02d}.tif', gbox=ds.geobox, 
+                                        resampling='bilinear').expand_dims({'time':[m]}))
+    
+    chpclim = xr.concat(chpclim, dim='time')
+   
+    def fun(ds, chpclim, era):
+        
+        ds = calculate_indices(ds,
+                               index=['EVI'],
+                               drop=False,
+                               normalise=False,
+                               collection='s2')
+        
+        # temporal statistics
+        ts = temporal_statistics(ds.EVI,
+                                stats=['f_mean',
+                                       'f_std',
+                                       'f_median',
+                                      'abs_change',
+                                       'mean_change',
+                                       'median_change',
+                                      'discordance',
+                                      'complexity',
+                                      'central_diff'])
+        
+        # geomedian and tmads
+        gm_mads = xr_geomedian_tmad(ds)
+        gm_mads = calculate_indices(gm_mads,
+                               index=['EVI','NDVI','LAI','MNDWI'],
+                               drop=False,
+                               normalise=False,
+                               collection='s2')
+        
+        gm_mads['sdev'] = -np.log(gm_mads['sdev'])
+        gm_mads['bcdev'] = -np.log(gm_mads['bcdev'])
+        gm_mads['edev'] = -np.log(gm_mads['edev'])
+        
+        # EVI stats 
+        gm_mads['evi_10'] = ds.EVI.quantile(0.1, dim='time')
+        gm_mads['evi_50'] = ds.EVI.quantile(0.5, dim='time')
+        gm_mads['evi_90'] = ds.EVI.quantile(0.9, dim='time')
+        gm_mads['evi_range'] = gm_mads['evi_90'] - gm_mads['evi_10']
+        gm_mads['evi_std'] = ds.EVI.std(dim='time')
+      
+        # rainfall climatology
+        gm_mads['rainclim_min'] = chpclim.min(dim='time')
+        gm_mads['rainclim_mean'] = chpclim.mean(dim='time')
+        gm_mads['rainclim_max'] = chpclim.max(dim='time')
+        gm_mads['rainclim_range'] = gm_mads['rainclim_max'] - gm_mads['rainclim_min']
+        gm_mads['rainclim_std'] = chpclim.std(dim='time')
+        
+        # merge
+        res = xr.merge([gm_mads, ts], compat='override')
+        
+        for band in res.data_vars:
+            res = res.rename({band:band+era})              
+      
+        return res
+    
+    epoch0 = fun(ds, chpclim, era='_S0')
+    
+    #slope
+    url_slope = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_slope_africa.tif"
+    slope = rio_slurp_xarray(url_slope, gbox=ds.geobox)
+    slope = slope.to_dataset(name='slope')
+    
+    # MrVBF
+    url_mrvbf = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_mrvbf_africa.tif"
+    mrvbf = rio_slurp_xarray(url_mrvbf, gbox=ds.geobox)
+    mrvbf = mrvbf.to_dataset(name='mrvbf')
+    
+    # MrRTF
+    url_mrrtf = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_mrrtf_africa.tif"
+    mrrtf = rio_slurp_xarray(url_mrrtf, gbox=ds.geobox)
+    mrrtf = mrrtf.to_dataset(name='mrrtf')
+    
+    result = xr.merge([epoch0,
+                       slope,
+                      mrvbf,
+                      mrrtf],compat='override')
+    
+    return result.squeeze()
+
+def flatness_gm_mads_evi_rainfall_hdstats_annual_predict(ds):
+    """
+    Annual 
+    gm + mads
+    evi stats (10, 50, 90 percentile, range, std)
+    rainfall clim stats (min, mean, max, range, std) from monthly data (yearly stats removed)
+    MrVBF (valley bottom flatness) & MrRTF (ridge top flatness): give an indication of slope gradient over scale
+    hdstats
+    """
+    dc = datacube.Datacube(app='training')
+    ds = ds / 10000
+    ds = ds.rename({'nir_1':'nir_wide', 'nir_2':'nir'})
+
+    chpclim = []
+    for m in range(1,13):
+        chpclim.append(rio_slurp_xarray(f'https://deafrica-data-dev.s3.amazonaws.com/product-dev/deafrica_chpclim_50n_50s_{m:02d}.tif', gbox=ds.geobox, 
+                                        resampling='bilinear').expand_dims({'time':[m]}))
+    
+    chpclim = xr.concat(chpclim, dim='time')
+   
+    def fun(ds, chpclim, era):
+        
+        ds = calculate_indices(ds,
+                               index=['EVI'],
+                               drop=False,
+                               normalise=False,
+                               collection='s2')
+        
+        # temporal statistics
+        ts = temporal_statistics(ds.EVI,
+                                stats=['f_mean',
+                                       'f_std',
+                                       'f_median',
+                                      'abs_change',
+                                       'mean_change',
+                                       'median_change',
+                                      'discordance',
+                                      'complexity',
+                                      'central_diff'])
+        
+        # geomedian and tmads
+        gm_mads = xr_geomedian_tmad_new(ds).compute()
+        #gm_mads = xr_geomedian_tmad(ds).compute()
+        # if using _new then ensure dask chunks in 4_Predict are set to {}
+        
+        gm_mads = calculate_indices(gm_mads,
+                               index=['EVI','NDVI','LAI','MNDWI'],
+                               drop=False,
+                               normalise=False,
+                               collection='s2')
+        
+        gm_mads['sdev'] = -np.log(gm_mads['sdev'])
+        gm_mads['bcdev'] = -np.log(gm_mads['bcdev'])
+        gm_mads['edev'] = -np.log(gm_mads['edev'])
+        
+        # EVI stats 
+        gm_mads['evi_10'] = ds.chunk({'x':2000, 'y':2000, 'time':-1}).EVI.quantile(0.1, dim='time').compute()
+        gm_mads['evi_50'] = ds.chunk({'x':2000, 'y':2000, 'time':-1}).EVI.quantile(0.5, dim='time').compute()
+        gm_mads['evi_90'] = ds.chunk({'x':2000, 'y':2000, 'time':-1}).EVI.quantile(0.9, dim='time').compute()
+        gm_mads['evi_range'] = gm_mads['evi_90'] - gm_mads['evi_10']
+        gm_mads['evi_std'] = ds.EVI.std(dim='time')
+      
+        # rainfall climatology
+        gm_mads['rainclim_min'] = chpclim.min(dim='time')
+        gm_mads['rainclim_mean'] = chpclim.mean(dim='time')
+        gm_mads['rainclim_max'] = chpclim.max(dim='time')
+        gm_mads['rainclim_range'] = gm_mads['rainclim_max'] - gm_mads['rainclim_min']
+        gm_mads['rainclim_std'] = chpclim.std(dim='time')
+        
+        #gm_mads = gm_mads #.chunk({'x':2000,'y':2000})
+        #remove this line?
+        
+        # merge
+        res = xr.merge([gm_mads, ts], compat='override')
+        
+        for band in res.data_vars:
+            res = res.rename({band:band+era})              
+      
+        return res.chunk({'x':2000,'y':2000})
+    
+    epoch0 = fun(ds, chpclim, era='_S0')
+    
+    #slope
+    url_slope = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_slope_africa.tif"
+    slope = rio_slurp_xarray(url_slope, gbox=ds.geobox)
+    slope = slope.to_dataset(name='slope').chunk({'x':2000,'y':2000})
+    
+    # MrVBF
+    url_mrvbf = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_mrvbf_africa.tif"
+    mrvbf = rio_slurp_xarray(url_mrvbf, gbox=ds.geobox)
+    mrvbf = mrvbf.to_dataset(name='mrvbf').chunk({'x':2000,'y':2000})
+    
+    # MrRTF
+    url_mrrtf = "https://deafrica-data.s3.amazonaws.com/ancillary/dem-derivatives/cog_mrrtf_africa.tif"
+    mrrtf = rio_slurp_xarray(url_mrrtf, gbox=ds.geobox)
+    mrrtf = mrrtf.to_dataset(name='mrrtf').chunk({'x':2000,'y':2000})
+    
+    result = xr.merge([epoch0,
+                       slope,
+                      mrvbf,
+                      mrrtf],compat='override')
+    
+    return result.squeeze()
 
 def xr_geomedian_tmad(ds, axis='time', where=None, **kw):
     """
